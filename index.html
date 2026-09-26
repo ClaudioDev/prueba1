@@ -68,6 +68,16 @@
   button:hover { border-color: var(--fire); }
   button:active { transform: translate(2px, 2px); box-shadow: 1px 1px 0 #000; }
   button[aria-pressed="true"] { border-color: var(--magic); color: var(--magic); }
+  .sound-cta {
+    position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
+    font-size: clamp(9px, 1.6vw, 13px);
+    padding: 14px 18px;
+    background: rgba(12, 10, 18, .88);
+    border-color: var(--fire);
+    color: #fff3c4;
+  }
+  .sound-cta:active { transform: translate(calc(-50% + 2px), calc(-50% + 2px)); }
+  .sound-cta[hidden] { display: none; }
   footer { margin-top: 22px; color: var(--muted); font-size: 13px; line-height: 1.6; }
   footer kbd {
     font-family: "Press Start 2P", monospace; font-size: 9px;
@@ -83,16 +93,18 @@
   <div class="stage">
     <canvas id="scene" width="320" height="180" aria-label="Animación: un demonio de fuego surge del abismo, pelea con un mago y lo arrastra con su látigo"></canvas>
     <div class="bar"><div id="progress"></div></div>
+    <button id="soundCta" class="sound-cta">▶ Activar sonido</button>
   </div>
 
   <div class="controls">
     <button id="btnPause" aria-pressed="false">Pausa</button>
     <button id="btnRestart">Reiniciar</button>
     <button id="btnSlow" aria-pressed="false">Lento x0.5</button>
+    <button id="btnSound" aria-pressed="false">Sonido: no</button>
   </div>
 
   <footer>
-    Atajos: <kbd>Espacio</kbd> pausa · <kbd>R</kbd> reinicia · <kbd>S</kbd> cámara lenta.
+    Atajos: <kbd>Espacio</kbd> pausa · <kbd>R</kbd> reinicia · <kbd>S</kbd> cámara lenta · <kbd>M</kbd> sonido.
     La escena se repite en bucle.
   </footer>
 </main>
@@ -429,6 +441,223 @@
     }
   }
 
+  // ---------- Audio: música y efectos generados con Web Audio ----------
+  const Sound = (() => {
+    let ac = null, master = null, bus = null, noiseBuf = null;
+    let enabled = false, lastStep = -1, fadeLevel = 1;
+    const STEP = .15; // semicorchea a 100 bpm
+    const mtof = m => 440 * Math.pow(2, (m - 69) / 12);
+
+    function init() {
+      ac = new (window.AudioContext || window.webkitAudioContext)();
+      master = ac.createGain();
+      master.gain.value = .6;
+      const comp = ac.createDynamicsCompressor();
+      comp.threshold.value = -18; comp.ratio.value = 8;
+      master.connect(comp); comp.connect(ac.destination);
+
+      // reverberación de caverna (impulso de ruido que decae)
+      const len = ac.sampleRate * 2.8, imp = ac.createBuffer(2, len, ac.sampleRate);
+      for (let c = 0; c < 2; c++) {
+        const d = imp.getChannelData(c);
+        for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / len, 3);
+      }
+      const rev = ac.createConvolver(); rev.buffer = imp;
+      const wet = ac.createGain(); wet.gain.value = .32;
+      rev.connect(wet); wet.connect(master);
+      bus = ac.createGain();
+      bus.connect(master); bus.connect(rev);
+
+      noiseBuf = ac.createBuffer(1, ac.sampleRate * 2, ac.sampleRate);
+      const nd = noiseBuf.getChannelData(0);
+      for (let i = 0; i < nd.length; i++) nd[i] = Math.random() * 2 - 1;
+    }
+
+    function env(g, t, dur, vol, attack = .005, release = .1) {
+      g.gain.setValueAtTime(0, t);
+      g.gain.linearRampToValueAtTime(vol, t + attack);
+      g.gain.setValueAtTime(vol, t + Math.max(attack, dur - release));
+      g.gain.linearRampToValueAtTime(0, t + dur);
+    }
+
+    function tone(freq, dur, o = {}) {
+      const t = ac.currentTime + (o.delay || 0);
+      const osc = ac.createOscillator();
+      osc.type = o.type || 'square';
+      osc.frequency.setValueAtTime(freq, t);
+      if (o.to) osc.frequency.exponentialRampToValueAtTime(o.to, t + dur);
+      if (o.detune) osc.detune.value = o.detune;
+      if (o.vib) {
+        const lfo = ac.createOscillator(), lg = ac.createGain();
+        lfo.frequency.value = o.vibRate || 5.5; lg.gain.value = o.vib;
+        lfo.connect(lg); lg.connect(osc.frequency);
+        lfo.start(t); lfo.stop(t + dur);
+      }
+      const g = ac.createGain();
+      env(g, t, dur, o.vol || .1, o.attack, o.release);
+      let node = osc;
+      if (o.lp) {
+        const f = ac.createBiquadFilter();
+        f.type = 'lowpass'; f.frequency.value = o.lp;
+        node.connect(f); node = f;
+      }
+      node.connect(g); g.connect(bus);
+      osc.start(t); osc.stop(t + dur + .05);
+    }
+
+    function noise(dur, o = {}) {
+      const t = ac.currentTime + (o.delay || 0);
+      const src = ac.createBufferSource();
+      src.buffer = noiseBuf; src.loop = true;
+      const f = ac.createBiquadFilter();
+      f.type = o.filter || 'lowpass';
+      f.frequency.setValueAtTime(o.freq || 1000, t);
+      if (o.to) f.frequency.exponentialRampToValueAtTime(o.to, t + dur);
+      f.Q.value = o.q || 1;
+      const g = ac.createGain();
+      env(g, t, dur, o.vol || .2, o.attack, o.release);
+      if (o.crackle) {
+        for (let k = 0; k < dur; k += .025) g.gain.setValueAtTime(Math.pow(Math.random(), 3) * o.vol, t + k);
+        g.gain.setValueAtTime(0, t + dur);
+      }
+      src.connect(f); f.connect(g); g.connect(bus);
+      src.start(t, Math.random()); src.stop(t + dur + .05);
+    }
+
+    const kick = (vol, delay = 0) => tone(150, .45, { type: 'sine', to: 38, vol, attack: .002, release: .4, delay });
+    const tom = vol => tone(110, .3, { type: 'sine', to: 60, vol, attack: .002, release: .28 });
+    const boom = v => { kick(v); noise(1.2, { filter: 'lowpass', freq: 400, to: 60, vol: v * .5, release: 1 }); };
+    const roar = (d, v = .35) => {
+      tone(95, d, { type: 'sawtooth', to: 48, vol: v, lp: 700, vib: 9, vibRate: 13, attack: .08, release: d * .5 });
+      tone(97, d, { type: 'sawtooth', to: 50, vol: v * .7, lp: 500, attack: .08, release: d * .5 });
+      noise(d, { filter: 'bandpass', freq: 500, to: 250, q: 1.5, vol: v * .8, attack: .08, release: d * .5 });
+    };
+    const pad = (notes, dur, vol = .045, lp = 1100) => {
+      for (const n of notes) for (const d of [-8, 0, 8]) {
+        tone(mtof(n), dur, { type: 'sawtooth', vol, lp, detune: d, attack: .35, release: .6 });
+      }
+    };
+    const whipCrack = () => {
+      noise(.08, { filter: 'highpass', freq: 2500, vol: .7, attack: .001, release: .07 });
+      tone(2400, .06, { type: 'square', to: 300, vol: .08, attack: .001 });
+    };
+
+    // Efectos de sonido
+    const SFX = {
+      rise: () => noise(2.6, { filter: 'lowpass', freq: 90, to: 700, vol: .45, attack: 2, release: .5 }),
+      land: () => boom(1),
+      roar: () => roar(1.1),
+      charge: () => {
+        tone(300, .8, { type: 'sine', to: 1400, vol: .08, vib: 20, vibRate: 18, attack: .3 });
+        tone(600, .8, { type: 'triangle', to: 2800, vol: .03, attack: .3 });
+      },
+      orb: () => {
+        noise(.5, { filter: 'bandpass', freq: 1200, to: 3200, q: 3, vol: .2, attack: .02 });
+        tone(900, .4, { type: 'sine', to: 450, vol: .1 });
+      },
+      hit: () => { boom(.7); noise(.4, { filter: 'highpass', freq: 2000, vol: .22, attack: .001, release: .35 }); },
+      whip: whipCrack,
+      fireball: () => { roar(.5, .25); noise(.8, { filter: 'bandpass', freq: 300, to: 1400, q: 2, vol: .35, attack: .1 }); },
+      fbHit: () => {
+        boom(.8);
+        tone(1568, 1.3, { type: 'sine', vol: .1, attack: .002, release: 1.2 });
+        tone(2093, 1, { type: 'sine', vol: .05, attack: .002, release: .9 });
+      },
+      bolt: () => {
+        noise(.8, { filter: 'highpass', freq: 1400, vol: .5, crackle: true });
+        tone(60, .8, { type: 'sawtooth', vol: .06, lp: 400 });
+      },
+      slam: () => { boom(1.3); noise(1.8, { filter: 'lowpass', freq: 300, to: 80, vol: .4, release: 1.5 }); },
+      crack: () => { for (let i = 0; i < 6; i++) noise(.05, { filter: 'bandpass', freq: rr(600, 1500), q: 4, vol: .5, delay: i * .05 + rr(0, .02), attack: .001, release: .04 }); },
+      break: () => { boom(.9); noise(2.2, { filter: 'lowpass', freq: 700, to: 120, vol: .55, attack: .03, release: 1.8 }); },
+      whipUp: () => noise(.4, { filter: 'bandpass', freq: 500, to: 2600, q: 2, vol: .3, attack: .05 }),
+      grab: whipCrack,
+      drag: () => noise(.6, { filter: 'bandpass', freq: 800, to: 400, q: 2, vol: .25, attack: .05 }),
+      hang: () => boom(.3),
+      fall: () => tone(1400, 1.4, { type: 'sine', to: 160, vol: .09, attack: .05, release: .4 }),
+    };
+
+    // Música por secciones, sincronizada con la escena
+    const CH = { Dm: [50, 53, 57], Bb: [46, 50, 53], C: [48, 52, 55], A: [45, 49, 52], Gm: [43, 46, 50] };
+    const BATTLE = ['Dm', 'Bb', 'C', 'A'];
+    const SAD = ['Dm', 'Gm', 'Bb', 'A'];
+    const LEAD = [69, 0, 74, 0, 76, 77, 76, 74, 72, 0, 69, 0, 0, 0, 0, 0, 70, 0, 74, 0, 77, 0, 76, 74, 76, 0, 0, 0, 73, 0, 0, 0];
+    const LAMENT = { 0: [81, 6], 6: [77, 4], 10: [76, 6], 16: [74, 8], 24: [73, 8] };
+    const rel = (s, start) => s - Math.ceil(start / STEP - 1e-6);
+
+    function musicStep(s) {
+      const t = s * STEP;
+      if (t < TL.land) {
+        // Intro: dron grave y latidos que crecen mientras sube el Balrog
+        if (s === 0) {
+          tone(mtof(26), TL.land + .6, { type: 'sawtooth', vol: .16, lp: 220, attack: 1.2, release: .6 });
+          tone(mtof(33), TL.land + .6, { type: 'sawtooth', vol: .1, lp: 220, attack: 1.2, release: .6 });
+        }
+        if (t >= TL.rise0 && s % 8 === 0) kick(.25 + .5 * t / TL.land);
+        if (t >= TL.rise0 && s % 8 === 2) kick(.15 + .3 * t / TL.land);
+      } else if (t < TL.slam) {
+        // Batalla: tambores, bajo ostinato, acordes y melodía
+        const r = rel(s, TL.land), bar = Math.floor(r / 16), chord = CH[BATTLE[bar % 4]];
+        if (r % 16 === 0) pad(chord, 16 * STEP + .3);
+        if (r % 4 === 0) kick(.55);
+        if (r % 8 === 6) kick(.3);
+        if (r % 8 === 4) tom(.35);
+        if (r % 2 === 0) {
+          const root = chord[0] - 12, note = r % 16 >= 12 ? root + 7 : root;
+          tone(mtof(note), STEP * 1.6, { type: 'sawtooth', vol: .13, lp: 500, release: .08 });
+        }
+        if (t >= TL.cast0) {
+          const n = LEAD[r % 32];
+          if (n) tone(mtof(n), STEP * 1.8, { type: 'square', vol: .045, vib: 4, lp: 2400, release: .1 });
+        }
+      } else if (t < TL.grab) {
+        // Clímax: acorde enorme y redoble hasta que se rompe el puente
+        const r = rel(s, TL.slam);
+        if (r === 0) {
+          for (const n of [38, 45, 50, 53, 57, 62]) tone(mtof(n), 1.9, { type: 'sawtooth', vol: .05, lp: 1800, attack: .01, release: 1.4 });
+          noise(1.6, { filter: 'highpass', freq: 5000, vol: .18, attack: .002, release: 1.5 });
+        }
+        if (t >= TL.slam + .6 && t < TL.brk) kick(.15 + .5 * seg(t, TL.slam + .6, TL.brk));
+      } else if (t < TL.fade0) {
+        // Lamento: el mago cae
+        const r = rel(s, TL.grab);
+        if (r % 16 === 0) {
+          pad(CH[SAD[Math.floor(r / 16) % 4]], 16 * STEP + .4, .04, 800);
+          tone(mtof(38), 16 * STEP, { type: 'triangle', vol: .12, attack: .2, release: .8 });
+        }
+        const n = LAMENT[r];
+        if (n) tone(mtof(n[0]), n[1] * STEP, { type: 'triangle', vol: .14, vib: 5, attack: .04, release: .3 });
+      }
+    }
+
+    return {
+      get enabled() { return enabled; },
+      enable() {
+        if (!ac) init();
+        ac.resume();
+        enabled = true;
+      },
+      disable() {
+        enabled = false;
+        if (ac) ac.suspend();
+      },
+      pause(p) { if (ac && enabled) (p ? ac.suspend() : ac.resume()); },
+      reset() { lastStep = -1; },
+      tick(t, level) {
+        if (!enabled) return;
+        const cs = Math.floor(t / STEP);
+        if (cs < lastStep) lastStep = -1;
+        for (let s = Math.max(lastStep + 1, cs - 3); s <= cs; s++) musicStep(s);
+        lastStep = cs;
+        if (Math.abs(level - fadeLevel) > .01) {
+          fadeLevel = level;
+          master.gain.setTargetAtTime(.6 * level, ac.currentTime, .05);
+        }
+      },
+      sfx(name) { if (enabled && SFX[name]) SFX[name](); },
+    };
+  })();
+
   // ---------- Poses del mago ----------
   // [mano x, mano y, ángulo del bastón] en unidades del sprite
   const POSE = {
@@ -594,6 +823,17 @@
     const G = geom(t);
     const Wz = wizState(t);
 
+    // Efectos de sonido de eventos sin partículas propias
+    once('sRise', t >= TL.rise0, () => Sound.sfx('rise'));
+    once('sCharge1', t >= 5.0, () => Sound.sfx('charge'));
+    once('sOrb', t >= TL.orb0, () => Sound.sfx('orb'));
+    once('sFire', t >= TL.fb0, () => Sound.sfx('fireball'));
+    once('sCharge2', t >= 10.6, () => Sound.sfx('charge'));
+    once('sBolt', t >= TL.bolt0, () => Sound.sfx('bolt'));
+    once('sWhipUp', t >= TL.whip0, () => Sound.sfx('whipUp'));
+    once('sDrag', t >= TL.tipped, () => Sound.sfx('drag'));
+    once('sFall', t >= TL.letgo, () => Sound.sfx('fall'));
+
     // Brasas que suben del abismo
     spawn(14, dt, () => addP({ kind: 'ember', x: rr(0, W), y: H + 2, vx: rr(-4, 4), vy: rr(-18, -38), life: rr(3, 6), size: 1 }));
 
@@ -615,6 +855,7 @@
 
     // Aterriza en el puente y ruge
     once('land', t >= TL.land, () => {
+      Sound.sfx('land'); Sound.sfx('roar');
       S.shake = 7; S.flash = .25; S.flashRGB = '255,120,40';
       for (let i = 0; i < 26; i++) addP({ kind: 'dust', x: G.bx + rr(20, 85), y: FLOOR - 1, vx: rr(-40, 40), vy: rr(-30, -5), g: 50, life: rr(.5, 1), size: 2 });
     });
@@ -638,6 +879,7 @@
       spawn(90, dt, () => addP({ kind: 'magic', x: o.x + rr(-2, 2), y: o.y + rr(-2, 2), vx: rr(-15, 5), vy: rr(-8, 8), life: rr(.2, .5), size: Math.random() < .5 ? 2 : 1 }));
     }
     once('hit1', t >= TL.orbHit, () => {
+      Sound.sfx('hit');
       burst(55, G.chest.x, G.chest.y, 'magic', 90);
       burst(20, G.chest.x, G.chest.y, 'spark', 70);
       S.flash = .6; S.flashRGB = '220,240,255'; S.shake = 6; S.hit = .15; S.knock = 14;
@@ -645,6 +887,7 @@
 
     // El Balrog responde: chasquido del látigo...
     once('crackwhip', t >= TL.lashCrack, () => {
+      Sound.sfx('whip');
       const wp = whipPoints(t, G, Wz), tip = wp[wp.length - 1];
       burst(25, tip.x, tip.y, 'spark', 80);
       S.shake = Math.max(S.shake, 3); S.flash = .2; S.flashRGB = '255,140,40';
@@ -656,6 +899,7 @@
       spawn(140, dt, () => addP({ kind: 'fire', x: f.x + rr(-3, 3), y: f.y + rr(-3, 3), vx: rr(5, 30), vy: rr(-20, 5), life: rr(.2, .5), size: 2 }));
     }
     once('fbhit', t >= TL.fbHit, () => {
+      Sound.sfx('fbHit');
       const f = fireballPos(TL.fbHit, G);
       burst(70, f.x, f.y, 'fire', 110, { g: -20 });
       burst(25, f.x, f.y, 'magic', 60);
@@ -680,6 +924,7 @@
 
     // Golpe final con el bastón: ¡No pasarás!
     once('slam', t >= TL.slam, () => {
+      Sound.sfx('slam');
       S.shake = 8; S.flash = .8; S.flashRGB = '235,245,255';
       burst(40, G.bot.x, FLOOR, 'magic', 120, { vy: -40 });
       for (let i = 0; i < 24; i++) addP({ kind: 'dust', x: G.bot.x + rr(-14, 14), y: FLOOR - 1, vx: rr(-40, 40), vy: rr(-40, -10), g: 60, life: rr(.5, 1), size: 2 });
@@ -690,10 +935,12 @@
       spawn(90, dt, () => addP({ kind: Math.random() < .5 ? 'magic' : 'dust', x: fx + rr(-4, 4), y: FLOOR - 1, vx: rr(-20, 20), vy: rr(-50, -10), g: 60, life: rr(.3, .7), size: Math.random() < .5 ? 2 : 1 }));
     }
     once('crack', t >= TL.crack, () => {
+      Sound.sfx('crack');
       S.cracked = true; S.shake = Math.max(S.shake, 4); S.hit = .12;
       for (let i = 0; i < 14; i++) addP({ kind: 'dust', x: CRACK + rr(-3, 3), y: FLOOR + rr(0, 10), vx: rr(-20, 20), vy: rr(-10, 30), g: 120, life: rr(.6, 1.2), size: 2 });
     });
     once('break', t >= TL.brk, () => {
+      Sound.sfx('break');
       S.chunks = [];
       let x = CRACK;
       while (x < BR_END) {
@@ -718,6 +965,7 @@
 
     // El látigo atrapa al mago y lo arrastra
     once('grab', t >= TL.grab, () => {
+      Sound.sfx('grab');
       burst(30, Wz.feet.x, Wz.feet.y, 'spark', 70);
       S.shake = 5; S.flash = .25; S.flashRGB = '255,140,40';
     });
@@ -725,6 +973,7 @@
       spawn(60, dt, () => addP({ kind: 'dust', x: Wz.px - rr(0, 40), y: FLOOR - 1, vx: rr(-30, 0), vy: rr(-20, -5), g: 50, life: rr(.3, .7), size: 2 }));
     }
     once('hang', t >= TL.edge, () => {
+      Sound.sfx('hang');
       S.shake = 4;
       for (let i = 0; i < 16; i++) addP({ kind: 'dust', x: CRACK - rr(0, 20), y: FLOOR + rr(0, 4), vx: rr(-10, 10), vy: rr(10, 40), g: 120, life: rr(.6, 1.2), size: 2 });
     });
@@ -1065,10 +1314,11 @@
     elapsed += dt;
     T = elapsed;
     const t = elapsed % LOOP;
-    if (t < prevT) reset();
+    if (t < prevT) { reset(); Sound.reset(); }
     prevT = t;
     update(t, dt);
     draw(t);
+    if (!paused) Sound.tick(t, 1 - (t < .6 ? 0 : seg(t, TL.fade0, LOOP)));
     progress.style.width = (t / LOOP * 100).toFixed(2) + '%';
     requestAnimationFrame(frame);
   }
@@ -1077,8 +1327,19 @@
     paused = !paused;
     btnPause.textContent = paused ? 'Seguir' : 'Pausa';
     btnPause.setAttribute('aria-pressed', String(paused));
+    Sound.pause(paused);
   }
-  function restart() { elapsed = 0; prevT = 0; reset(); }
+  function restart() { elapsed = 0; prevT = 0; reset(); Sound.reset(); }
+  const btnSound = document.getElementById('btnSound');
+  const soundCta = document.getElementById('soundCta');
+  function setSound(on) {
+    if (on) Sound.enable(); else Sound.disable();
+    btnSound.textContent = on ? 'Sonido: sí' : 'Sonido: no';
+    btnSound.setAttribute('aria-pressed', String(on));
+    soundCta.hidden = true;
+  }
+  soundCta.addEventListener('click', () => { setSound(true); restart(); });
+  btnSound.addEventListener('click', () => setSound(!Sound.enabled));
   function toggleSlow() {
     speed = speed === 1 ? .5 : 1;
     btnSlow.setAttribute('aria-pressed', String(speed !== 1));
@@ -1091,6 +1352,7 @@
     if (e.code === 'Space') { e.preventDefault(); togglePause(); }
     else if (e.key === 'r' || e.key === 'R') restart();
     else if (e.key === 's' || e.key === 'S') toggleSlow();
+    else if (e.key === 'm' || e.key === 'M') setSound(!Sound.enabled);
   });
 
   // Permite abrir en un momento concreto: index.html#t=15
