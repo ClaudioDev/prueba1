@@ -535,10 +535,34 @@
     const kick = (vol, delay = 0) => tone(150, .45, { type: 'sine', to: 38, vol, attack: .002, release: .4, delay });
     const tom = vol => tone(110, .3, { type: 'sine', to: 60, vol, attack: .002, release: .28 });
     const boom = v => { kick(v); noise(1.2, { filter: 'lowpass', freq: 400, to: 60, vol: v * .5, release: 1 }); };
+    // Rugido: aliento ruidoso por una "garganta" (formantes) con aspereza irregular
     const roar = (d, v = .35) => {
-      tone(95, d, { type: 'sawtooth', to: 48, vol: v, lp: 700, vib: 9, vibRate: 13, attack: .08, release: d * .5 });
-      tone(97, d, { type: 'sawtooth', to: 50, vol: v * .7, lp: 500, attack: .08, release: d * .5 });
-      noise(d, { filter: 'bandpass', freq: 500, to: 250, q: 1.5, vol: v * .8, attack: .08, release: d * .5 });
+      const t = ac.currentTime, end = t + d;
+      const loop = () => { const s = ac.createBufferSource(); s.buffer = noiseBuf; s.loop = true; s.start(t, Math.random()); s.stop(end + .1); return s; };
+      const rough = ac.createGain(); rough.gain.value = .6;
+      const m = loop(), mlp = ac.createBiquadFilter(), mg = ac.createGain();
+      mlp.type = 'lowpass'; mlp.frequency.value = 50;
+      mg.gain.value = .45 * .9 / Math.sqrt(50 / (ac.sampleRate / 2));
+      m.connect(mlp); mlp.connect(mg); mg.connect(rough.gain);
+      loop().connect(rough);
+      const env = ac.createGain();
+      env.gain.setValueAtTime(0, t);
+      env.gain.linearRampToValueAtTime(v * 2.2, t + Math.min(.3, d * .3));
+      env.gain.setValueAtTime(v * 2, t + d * .6);
+      env.gain.linearRampToValueAtTime(0, end);
+      for (const [f0, f1, f2, q, g] of [[260, 540, 300, 3.5, 1], [700, 1100, 600, 4.5, .5], [2300, 2500, 1900, 6, .15]]) {
+        const bp = ac.createBiquadFilter(), gg = ac.createGain();
+        bp.type = 'bandpass'; bp.Q.value = q; gg.gain.value = g;
+        bp.frequency.setValueAtTime(f0, t);
+        bp.frequency.linearRampToValueAtTime(f1, t + d * .25);
+        bp.frequency.exponentialRampToValueAtTime(f2, end);
+        rough.connect(bp); bp.connect(gg); gg.connect(env);
+      }
+      const chest = ac.createBiquadFilter(), cg = ac.createGain();
+      chest.type = 'lowpass'; chest.frequency.value = 300; cg.gain.value = .8;
+      rough.connect(chest); chest.connect(cg); cg.connect(env);
+      env.connect(bus);
+      tone(44, d, { type: 'sine', to: 30, vol: v * .8, attack: .2, release: d * .5 });
     };
     const pad = (notes, dur, vol = .045, lp = 1100) => {
       for (const n of notes) for (const d of [-8, 0, 8]) {
