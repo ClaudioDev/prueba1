@@ -82,6 +82,7 @@
     <button id="btnLash">¡Latigazo!</button>
     <button id="btnShake" aria-pressed="false">Agitar látigo: no</button>
     <button id="btnSpin" aria-pressed="true">Giro auto: sí</button>
+    <button id="btnSmoke" aria-pressed="true">Humo: sí</button>
     <button id="btnSound" aria-pressed="false">Sonido: no</button>
     <button id="btnMusic" aria-pressed="true" hidden>Música: sí</button>
   </div>
@@ -479,7 +480,7 @@ async function build() {
   rim.position.set(-7, 6, -11);
   scene.add(rim);
   const bridgeGlow = new THREE.PointLight(0xff5a14, 25, 12, 2);
-  bridgeGlow.position.set(0, .8, 1.2);
+  bridgeGlow.position.set(0, .5, 2.2);
   scene.add(bridgeGlow);
 
   // ----- Puente y sala -----
@@ -603,36 +604,71 @@ async function build() {
     bodyGeo.setAttribute('skinWeight', new THREE.BufferAttribute(sw, 4));
     bodyGeo.setAttribute('aRest', new THREE.BufferAttribute(p.array.slice(), 3));
   }
+  // Oclusión de pliegues (a partir del SDF): los surcos entre músculos quedan oscuros y calientes
+  await step('Sombreando pliegues y músculos');
+  function addCavity(geo, prims, subs) {
+    const p = geo.attributes.position, n = geo.attributes.normal, cav = new Float32Array(p.count);
+    for (let i = 0; i < p.count; i++) {
+      const x = p.getX(i), y = p.getY(i), z = p.getZ(i), nx = n.getX(i), ny = n.getY(i), nz = n.getZ(i);
+      let occ = 0, wsum = 0;
+      for (let k = 1; k <= 5; k++) {
+        const hh = .06 * k, wgt = 1 / (1 << k);
+        occ += (hh - Math.min(hh, sdfOf(prims, subs, x + nx * hh, y + ny * hh, z + nz * hh, false))) * wgt;
+        wsum += hh * wgt;
+      }
+      cav[i] = Math.max(0, Math.min(1, 1 - 2.6 * occ / wsum));
+    }
+    geo.setAttribute('aCav', new THREE.BufferAttribute(cav, 1));
+  }
+  addCavity(bodyGeo, PRIMS, SUBS);
+  addCavity(jawGeo, JAW, []);
   jawGeo.setAttribute('aRest', new THREE.BufferAttribute(jawGeo.attributes.position.array.slice(), 3));
   jawGeo.translate(-J.jaw.x, -J.jaw.y, -J.jaw.z);
 
-  // ----- Material de la piel: relieve, grietas de lava, brillo de obsidiana -----
-  const skinMat = new THREE.MeshPhysicalMaterial({ color: 0x1b1210, roughness: .68, metalness: 0, clearcoat: .35, clearcoatRoughness: .45 });
+  // ----- Piel: carbón y ceniza, placas carbonizadas, fuego interior en los pliegues -----
+  const skinMat = new THREE.MeshPhysicalMaterial({
+    color: 0xffffff, roughness: .85, metalness: 0,
+    sheen: .3, sheenRoughness: .8, sheenColor: new THREE.Color(.3, .2, .15),
+  });
   skinMat.onBeforeCompile = sh => {
     Object.assign(sh.uniforms, { uCrack: { value: crackTex }, uBumpTex: { value: bumpTex }, uLava: lavaU, uTime: timeU });
     sh.vertexShader = sh.vertexShader
-      .replace('#include <common>', '#include <common>\nattribute vec3 aRest;\nvarying vec3 vRest;\nvarying vec3 vRestN;')
-      .replace('#include <beginnormal_vertex>', '#include <beginnormal_vertex>\nvRestN = normal;\nvRest = aRest;');
+      .replace('#include <common>', '#include <common>\nattribute vec3 aRest;\nattribute float aCav;\nvarying vec3 vRest;\nvarying vec3 vRestN;\nvarying float vCav;')
+      .replace('#include <beginnormal_vertex>', '#include <beginnormal_vertex>\nvRestN = normal;\nvRest = aRest;\nvCav = aCav;');
     sh.fragmentShader = sh.fragmentShader
       .replace('#include <common>', `#include <common>
 uniform sampler2D uCrack; uniform sampler2D uBumpTex; uniform float uLava; uniform float uTime;
-varying vec3 vRest; varying vec3 vRestN;
-float gCrack; float gHeight;
+varying vec3 vRest; varying vec3 vRestN; varying float vCav;
+float gCrack; float gHeight; float gHeat; float gAsh;
 vec3 triW(vec3 n) { vec3 w = pow(abs(n), vec3(4.0)); return w / (w.x + w.y + w.z); }
 float tri(sampler2D t, vec3 p, vec3 w) { return texture2D(t, p.yz).r * w.x + texture2D(t, p.zx).r * w.y + texture2D(t, p.xy).r * w.z; }`)
       .replace('#include <color_fragment>', `#include <color_fragment>
 {
-  vec3 w = triW(normalize(vRestN));
-  float crack = tri(uCrack, vRest * 0.38, w);
-  float n1 = tri(uBumpTex, vRest * 1.2, w);
-  float n2 = tri(uBumpTex, vRest * 4.3, w);
+  vec3 rn = normalize(vRestN);
+  vec3 w = triW(rn);
+  float plates = tri(uCrack, vRest * 0.2 + 1.7, w);        // grietas entre placas grandes
+  float fine = tri(uCrack, vRest * 0.85 + 3.1, w);         // grietas finas
+  float n1 = tri(uBumpTex, vRest * 1.1, w);
+  float n2 = tri(uBumpTex, vRest * 3.6, w);
+  float n3 = tri(uBumpTex, vRest * 9.5, w);
+  float cav = vCav;
+  // calor: sale por los pliegues profundos y por el pecho y la garganta
+  float front = smoothstep(3.2, 4.6, vRest.y) * smoothstep(5.9, 5.3, vRest.y) * smoothstep(0.1, 0.7, vRest.z);
+  gHeat = clamp((1.0 - cav) * 1.3 + front * 0.7, 0.0, 1.0);
+  float crack = max(plates, fine * 0.55) * (0.25 + 0.75 * gHeat);
   gCrack = crack;
-  gHeight = n1 * 0.55 + n2 * 0.45 - crack * 1.2;
-  diffuseColor.rgb *= 0.65 + 0.7 * n1;
-  diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.03, 0.01, 0.005), smoothstep(0.05, 0.35, crack));
+  // carbón con ceniza gris en las zonas expuestas y hacia arriba
+  vec3 coal = vec3(0.032, 0.026, 0.024);
+  vec3 ash = vec3(0.24, 0.215, 0.2);
+  gAsh = smoothstep(0.42, 0.8, n1 * 0.55 + n3 * 0.45) * (0.3 + 0.7 * clamp(rn.y, 0.0, 1.0)) * smoothstep(0.35, 0.85, cav);
+  vec3 base = mix(coal, ash, gAsh * 0.85);
+  base *= 0.65 + 0.7 * n2;
+  base *= mix(0.3, 1.0, cav);
+  diffuseColor.rgb = mix(base, vec3(0.015, 0.005, 0.002), smoothstep(0.08, 0.4, crack));
+  gHeight = n2 * 0.3 + n3 * 0.2 + (1.0 - max(plates, fine * 0.5)) * 0.45;
 }`)
       .replace('#include <roughnessmap_fragment>', `#include <roughnessmap_fragment>
-roughnessFactor = clamp(roughnessFactor + (gHeight - 0.4) * 0.35 - gCrack * 0.4, 0.18, 1.0);`)
+roughnessFactor = clamp(0.78 + gAsh * 0.2 - gCrack * 0.35 + (gHeight - 0.5) * 0.15, 0.3, 1.0);`)
       .replace('#include <normal_fragment_maps>', `#include <normal_fragment_maps>
 {
   vec3 dpdx = dFdx(-vViewPosition), dpdy = dFdy(-vViewPosition);
@@ -640,13 +676,19 @@ roughnessFactor = clamp(roughnessFactor + (gHeight - 0.4) * 0.35 - gCrack * 0.4,
   vec3 r1 = cross(dpdy, normal), r2 = cross(normal, dpdx);
   float det = dot(dpdx, r1);
   vec3 grad = sign(det) * (dhx * r1 + dhy * r2);
-  normal = normalize(abs(det) * normal - 0.02 * grad);
+  normal = normalize(abs(det) * normal - 0.06 * grad);
 }`)
       .replace('#include <emissivemap_fragment>', `#include <emissivemap_fragment>
 {
-  float pulse = 0.7 + 0.3 * sin(uTime * 2.3 + vRest.y * 1.7 + vRest.x * 2.1);
-  vec3 lava = mix(vec3(1.0, 0.22, 0.02), vec3(1.0, 0.72, 0.28), smoothstep(0.55, 1.0, gCrack));
-  totalEmissiveRadiance += lava * gCrack * gCrack * uLava * pulse * 3.2;
+  vec3 w = triW(normalize(vRestN));
+  // la lava "fluye" lentamente dentro de las grietas
+  float flow = tri(uBumpTex, vRest * 0.7 + vec3(0.0, -uTime * 0.12, uTime * 0.03), w);
+  float glow = gCrack * gCrack * (0.6 + 0.9 * flow) + (1.0 - vCav) * 0.18 * flow * gHeat;
+  vec3 lava = mix(vec3(0.85, 0.16, 0.02), vec3(1.0, 0.6, 0.2), smoothstep(0.35, 0.9, glow));
+  totalEmissiveRadiance += lava * glow * uLava * 2.8;
+  // brasa en los bordes (como carbón encendido)
+  float fres = pow(1.0 - clamp(dot(normal, normalize(vViewPosition)), 0.0, 1.0), 3.0);
+  totalEmissiveRadiance += vec3(1.0, 0.28, 0.05) * fres * 0.1 * uLava * (0.4 + 0.6 * gHeat);
 }`);
   };
 
@@ -703,7 +745,7 @@ roughnessFactor = clamp(roughnessFactor + (gHeight - 0.4) * 0.35 - gCrack * 0.4,
   const headFire = new THREE.PointLight(0xff8a30, 55, 14, 2);
   attach(Bn.head, headFire, V(0, 7.1, .6));
   const chestFire = new THREE.PointLight(0xff6a1a, 60, 20, 2);
-  attach(Bn.chest, chestFire, V(0, 4.9, 2.2));
+  attach(Bn.chest, chestFire, V(0, 6.6, -.9));
 
   for (let i = 0; i < 8; i++) {                               // púas de la espalda
     const y = 3.6 + i * .24, z = -.5 - Math.sin(i / 7 * Math.PI) * .25;
@@ -906,12 +948,12 @@ function makeSmokeMat(noiseTex) {
         vec2 ruv = mat2(cos(ang), -sin(ang), sin(ang), cos(ang)) * (uv - 0.5) + 0.5;
         float n = texture2D(uNoise, ruv * 0.6 + vec2(vSeed * 5.0, vSeed * 3.0 - uTime * 0.03)).r;
         float n2 = texture2D(uNoise, ruv * 1.4 + vec2(vSeed * 2.0 + uTime * 0.02, vSeed * 7.0)).r;
-        float a = smoothstep(0.5, 0.1, length(uv - 0.5) + (n * 0.7 + n2 * 0.3 - 0.5) * 0.55);
-        a *= smoothstep(0.0, 0.3, vLife) * smoothstep(1.0, 0.8, vLife) * 0.5;
+        float a = smoothstep(0.5, 0.05, length((uv - 0.5) * vec2(1.25, 0.8)) + (n * 0.7 + n2 * 0.3 - 0.5) * 0.7);
+        a *= smoothstep(0.0, 0.45, vLife) * smoothstep(1.0, 0.75, vLife) * 0.3;
         if (a < 0.004) discard;
         // más joven = más cerca del fuego: iluminado en naranja desde abajo
         float lit = smoothstep(0.55, 1.0, vLife) * (0.55 + 0.45 * (1.0 - uv.y));
-        vec3 col = mix(vec3(0.06, 0.05, 0.047), vec3(0.42, 0.16, 0.055), lit);
+        vec3 col = mix(vec3(0.028, 0.024, 0.023), vec3(0.2, 0.075, 0.025), lit);
         col *= 0.75 + 0.5 * n2;
         gl_FragColor = vec4(col, a);
       }`,
@@ -1442,7 +1484,7 @@ onResize();
 // ---------- Animación ----------
 const clock = new THREE.Clock();
 const tmpA = new THREE.Vector3(), tmpB = new THREE.Vector3(), _p = new THREE.Vector3(), _v = new THREE.Vector3();
-let prevFlapVel = 1;
+let prevFlapVel = 1, smokeOn = true;
 function spawn(rate, dt, fn) {
   let n = rate * dt;
   while (n >= 1) { fn(); n--; }
@@ -1504,9 +1546,9 @@ function animate() {
 
   // Luces y lava
   lavaU.value = 1 + e * .8 + Math.sin(t * 5.3) * .06;
-  W.chestFire.intensity = 38 + Math.random() * 14 + e * 40;
+  W.chestFire.intensity = 30 + Math.random() * 12 + e * 35;
   W.headFire.intensity = 32 + Math.random() * 16 + e * 30;
-  W.bridgeGlow.intensity = 22 + Math.random() * 6 + e * 20;
+  W.bridgeGlow.intensity = 30 + Math.random() * 8 + e * 20;
   W.root.position.x = e > 0 ? (Math.random() - .5) * .04 * e : 0;
   W.root.updateMatrixWorld(true);
 
@@ -1527,7 +1569,6 @@ function animate() {
         _v.set(rand(-1, 1), rand(-.3, 1), rand(-1, 1)).normalize().multiplyScalar(rand(3, 10));
         fire.emit(tip, _v, rand(.06, .18), rand(.2, .5));
       }
-      for (let i = 0; i < 8; i++) smoke.emit(tip, _v.set(rand(-.6, .6), rand(.2, .9), rand(-.6, .6)), rand(.6, 1.2), rand(1.5, 2.8));
       Sound.crack();
     }
     crackLight.intensity *= Math.max(0, 1 - dt * 9);
@@ -1557,7 +1598,7 @@ function animate() {
       const sp = rand(6, 11);
       fire.emit(m0, _v.set(dir.x * sp + rand(-.8, .8), dir.y * sp + rand(-.4, 1), dir.z * sp + rand(-.8, .8)), rand(.35, .75), rand(.4, .8));
     });
-    spawn(70 * e, dt, () => {
+    if (smokeOn) spawn(40 * e, dt, () => {
       const sp = rand(2.5, 4.5);
       smoke.emit(m0, _v.set(dir.x * sp + rand(-.6, .6), dir.y * sp + rand(0, 1), dir.z * sp + rand(-.6, .6)), rand(1.2, 2.2), rand(2.5, 4));
     });
@@ -1570,12 +1611,12 @@ function animate() {
     });
   }
   spawn(28, dt, () => fire.emit(_p.set(rand(-14, 14), rand(-12, -2), rand(-20, 20)), _v.set(rand(-.2, .2), rand(.6, 1.4), rand(-.2, .2)), rand(.05, .1), rand(4, 7)));
-  // Humo: columnas sobre las llamas, manto de sombra, suelo humeante y espada
-  spawn(30 * boost, dt, () => smoke.emit(restToWorld(B.head, rand(-.4, .4), rand(6.9, 7.4), rand(.3, 1)), _v.set(rand(-.3, .3), rand(1.1, 1.8), rand(-.8, -.2)), rand(1.6, 2.8), rand(4, 6)));
-  spawn(38 * boost, dt, () => smoke.emit(restToWorld(B.chest, rand(-1.2, 1.2), rand(5.9, 6.7), rand(-.9, .1)), _v.set(rand(-.35, .35), rand(1, 1.6), rand(-.7, 0)), rand(1.8, 3.2), rand(4, 6)));
-  spawn(18, dt, () => smoke.emit(restToWorld(B.chest, rand(-2.8, 2.8), rand(3.6, 6.2), rand(-1.8, -.6)), _v.set(rand(-.2, .2), rand(.25, .6), rand(-.3, .05)), rand(2.6, 4.6), rand(6, 9)));
-  spawn(10, dt, () => { const a = Math.random() * Math.PI * 2, r = rand(.6, 2); smoke.emit(_p.set(Math.cos(a) * r, .1, Math.sin(a) * r - .3), _v.set(rand(-.15, .15), rand(.25, .55), rand(-.15, .15)), rand(1, 2), rand(3.5, 5.5)); });
-  spawn(8, dt, () => { W.sword.localToWorld(_p.set(0, 3.5, 0)); smoke.emit(_p, _v.set(rand(-.1, .1), rand(.5, .9), rand(-.1, .1)), rand(.4, .8), rand(2, 3.5)); });
+  // Humo: tenue y oscuro, subiendo sobre las llamas, y un velo de sombra detrás
+  if (smokeOn) {
+    spawn(14 * boost, dt, () => smoke.emit(restToWorld(B.head, rand(-.4, .4), rand(7.1, 7.6), rand(.2, .9)), _v.set(rand(-.25, .25), rand(1.4, 2.2), rand(-.8, -.3)), rand(2.2, 3.4), rand(3.5, 5)));
+    spawn(18 * boost, dt, () => smoke.emit(restToWorld(B.chest, rand(-1.1, 1.1), rand(6.2, 6.9), rand(-.9, 0)), _v.set(rand(-.3, .3), rand(1.3, 2), rand(-.8, -.2)), rand(2.4, 3.8), rand(3.5, 5)));
+    spawn(6, dt, () => smoke.emit(restToWorld(B.chest, rand(-2.6, 2.6), rand(4.2, 6.2), rand(-2.2, -1.2)), _v.set(rand(-.15, .15), rand(.3, .6), rand(-.3, 0)), rand(3.2, 5), rand(6, 9)));
+  }
 
   fire.update(dt, t);
   smoke.update(dt, t);
@@ -1621,6 +1662,12 @@ for (const type of ['pointerup', 'pointercancel']) cvEl.addEventListener(type, (
 window.addEventListener('keydown', ev => {
   if (ev.key === 'l' || ev.key === 'L') lash(clock.elapsedTime);
   if (ev.key === 'r' || ev.key === 'R') roar(clock.elapsedTime);
+});
+const btnSmoke = document.getElementById('btnSmoke');
+btnSmoke.addEventListener('click', () => {
+  smokeOn = !smokeOn;
+  btnSmoke.textContent = smokeOn ? 'Humo: sí' : 'Humo: no';
+  btnSmoke.setAttribute('aria-pressed', String(smokeOn));
 });
 btnMusic.addEventListener('click', () => {
   const m = Sound.toggleMusic();
