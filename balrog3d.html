@@ -1,0 +1,896 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>El Balrog en 3D</title>
+<meta name="description" content="Un Balrog en 3D, animado y envuelto en llamas. Gira a su alrededor con el dedo o el mouse.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #0b0507;
+    --panel: rgba(18, 12, 16, .78);
+    --border: #3a2a30;
+    --fg: #f1ebe4;
+    --muted: #b7a9a6;
+    --fire: #ff8a2a;
+    --magic: #9fd4ff;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: var(--bg); color: var(--fg); }
+  body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  canvas { display: block; touch-action: none; cursor: grab; }
+  canvas:active { cursor: grabbing; }
+
+  .ui { position: fixed; left: 0; right: 0; padding: 14px 16px; pointer-events: none; z-index: 2; }
+  .ui > * { pointer-events: auto; }
+  .top { top: 0; display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+    background: linear-gradient(rgba(0,0,0,.6), transparent); }
+  .bottom { bottom: 0; display: flex; flex-direction: column; align-items: center; gap: 10px;
+    background: linear-gradient(transparent, rgba(0,0,0,.65)); padding-bottom: max(16px, env(safe-area-inset-bottom)); }
+  h1 {
+    margin: 0; font-family: "Press Start 2P", monospace; font-size: clamp(12px, 2.6vw, 20px);
+    color: var(--fire); text-shadow: 3px 3px 0 #3a0e08; pointer-events: none;
+  }
+  h1 span { color: var(--magic); text-shadow: 3px 3px 0 #10223d; }
+  .hint { margin: 0; color: var(--muted); font-size: 13px; text-align: center; text-shadow: 0 1px 3px #000; pointer-events: none; }
+  .row { display: flex; flex-wrap: wrap; gap: 10px; justify-content: center; }
+  .btn, button {
+    font-family: "Press Start 2P", monospace; font-size: 10px; line-height: 1.4;
+    padding: 11px 14px; color: var(--fg); background: var(--panel);
+    border: 2px solid var(--border); box-shadow: 3px 3px 0 #000;
+    cursor: pointer; text-decoration: none; backdrop-filter: blur(4px);
+  }
+  .btn:hover, button:hover { border-color: var(--fire); }
+  button:active, .btn:active { transform: translate(2px, 2px); box-shadow: 1px 1px 0 #000; }
+  button[aria-pressed="true"] { border-color: var(--magic); color: var(--magic); }
+  #roar { border-color: var(--fire); color: #fff3c4; }
+
+  #loading {
+    position: fixed; inset: 0; display: grid; place-items: center; z-index: 3;
+    background: var(--bg); font-family: "Press Start 2P", monospace; font-size: 12px;
+    color: var(--fire); text-align: center; line-height: 2; padding: 16px;
+    transition: opacity .6s;
+  }
+  #loading.hide { opacity: 0; pointer-events: none; }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+</head>
+<body>
+<div id="loading">Invocando al Balrog…</div>
+
+<div class="ui top">
+  <a class="btn" href="index.html">← Volver</a>
+  <h1>El Balrog <span>3D</span></h1>
+</div>
+
+<div class="ui bottom">
+  <p class="hint">Arrastra para girar · pellizca o usa la rueda para acercar</p>
+  <div class="row">
+    <button id="btnRoar">¡Rugir!</button>
+    <button id="btnSpin" aria-pressed="true">Giro auto: sí</button>
+    <button id="btnSound" aria-pressed="false">Sonido: no</button>
+  </div>
+</div>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
+
+const loading = document.getElementById('loading');
+
+// ---------- Utilidades ----------
+const rand = (a, b) => a + Math.random() * (b - a);
+const lerp = THREE.MathUtils.lerp;
+const V = (x, y, z) => new THREE.Vector3(x, y, z);
+
+function mulberry32(a) {
+  return () => {
+    a |= 0; a = a + 0x6D2B79F5 | 0;
+    let t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+
+// Ruido de valor 3D (para dar relieve rocoso a la piel)
+function hash3(x, y, z) {
+  let h = (Math.imul(x, 374761393) + Math.imul(y, 668265263) + Math.imul(z, 1274126177)) | 0;
+  h = Math.imul(h ^ (h >>> 13), 1274126177);
+  h ^= h >>> 16;
+  return (h >>> 0) / 4294967295;
+}
+function noise3(x, y, z) {
+  const xi = Math.floor(x), yi = Math.floor(y), zi = Math.floor(z);
+  const xf = x - xi, yf = y - yi, zf = z - zi;
+  const s = t => t * t * (3 - 2 * t);
+  const u = s(xf), v = s(yf), w = s(zf);
+  let r = 0;
+  for (let dz = 0; dz < 2; dz++) for (let dy = 0; dy < 2; dy++) for (let dx = 0; dx < 2; dx++) {
+    r += hash3(xi + dx, yi + dy, zi + dz) * (dx ? u : 1 - u) * (dy ? v : 1 - v) * (dz ? w : 1 - w);
+  }
+  return r;
+}
+const fbm = (x, y, z) => noise3(x, y, z) * .65 + noise3(x * 2.1, y * 2.1, z * 2.1) * .35;
+
+function rockify(geo, amount, freq = 3, seed = 0) {
+  const p = geo.attributes.position, n = geo.attributes.normal;
+  for (let i = 0; i < p.count; i++) {
+    const x = p.getX(i), y = p.getY(i), z = p.getZ(i);
+    const d = (fbm(x * freq + seed, y * freq, z * freq) - .5) * 2 * amount;
+    p.setXYZ(i, x + n.getX(i) * d, y + n.getY(i) * d, z + n.getZ(i) * d);
+  }
+  geo.computeVertexNormals();
+  return geo;
+}
+
+// Tubo con radio variable (cuernos, huesos, cola, látigo)
+function taperTube(points, r0, r1, tubular = 32, radial = 10, geo = null) {
+  const curve = new THREE.CatmullRomCurve3(points);
+  const g = new THREE.TubeGeometry(curve, tubular, 1, radial, false);
+  const pos = g.attributes.position, v = new THREE.Vector3(), c = new THREE.Vector3();
+  for (let i = 0; i <= tubular; i++) {
+    const t = i / tubular;
+    curve.getPointAt(t, c);
+    const r = lerp(r0, r1, Math.pow(t, .9));
+    for (let j = 0; j <= radial; j++) {
+      const idx = i * (radial + 1) + j;
+      v.fromBufferAttribute(pos, idx).sub(c).multiplyScalar(r).add(c);
+      pos.setXYZ(idx, v.x, v.y, v.z);
+    }
+  }
+  g.computeVertexNormals();
+  if (geo) geo.dispose();
+  return g;
+}
+
+// ---------- Texturas procedurales ----------
+function crackCanvas(size = 512, grid = 9, seed = 7) {
+  const rnd = mulberry32(seed);
+  const cs = size / grid, pts = [];
+  for (let j = 0; j < grid; j++) for (let i = 0; i < grid; i++) pts.push([(i + rnd()) * cs, (j + rnd()) * cs]);
+  const cv = document.createElement('canvas');
+  cv.width = cv.height = size;
+  const ctx = cv.getContext('2d');
+  const img = ctx.createImageData(size, size);
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      const gx = Math.floor(x / cs), gy = Math.floor(y / cs);
+      let f1 = 1e9, f2 = 1e9;
+      for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+        const cx = (gx + dx + grid) % grid, cy = (gy + dy + grid) % grid;
+        const p = pts[cy * grid + cx];
+        const px = p[0] + (gx + dx - cx) * cs, py = p[1] + (gy + dy - cy) * cs;
+        const d = Math.hypot(x - px, y - py);
+        if (d < f1) { f2 = f1; f1 = d; } else if (d < f2) f2 = d;
+      }
+      const edge = f2 - f1;
+      const mott = .45 + .55 * noise3(x / 40, y / 40, 3);
+      // zonas grandes de roca apagada y zonas con grietas vivas
+      const mask = Math.min(1, Math.max(0, (noise3(x / 75, y / 75, 5) - .38) / .22));
+      let k = Math.max(0, 1 - edge / 4.5) ** 2 * mott * mask;
+      k += Math.max(0, 1 - edge / 18) ** 3 * .2 * mott * mask;
+      k = Math.min(1, k);
+      const i = (y * size + x) * 4;
+      img.data[i] = 255 * Math.min(1, k * 1.2);
+      img.data[i + 1] = 255 * k * k * .75 + 40 * k;
+      img.data[i + 2] = 255 * k * k * k * .35;
+      img.data[i + 3] = 255;
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+  return cv;
+}
+
+function noiseCanvas(size = 256, scale = 18, seed = 1) {
+  const cv = document.createElement('canvas');
+  cv.width = cv.height = size;
+  const ctx = cv.getContext('2d');
+  const img = ctx.createImageData(size, size);
+  for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) {
+    // ruido que se repite sin costuras (mezcla de 4 muestras)
+    const u = x / size, v = y / size;
+    const f = (a, b) => fbm(a * scale / 4, b * scale / 4, seed);
+    const n = f(x, y) * (1 - u) * (1 - v) + f(x - size, y) * u * (1 - v) + f(x, y - size) * (1 - u) * v + f(x - size, y - size) * u * v;
+    const c = 255 * n, i = (y * size + x) * 4;
+    img.data[i] = img.data[i + 1] = img.data[i + 2] = c; img.data[i + 3] = 255;
+  }
+  ctx.putImageData(img, 0, 0);
+  return cv;
+}
+
+function tex(canvas, repeat, srgb = true) {
+  const t = new THREE.CanvasTexture(canvas);
+  t.wrapS = t.wrapT = THREE.RepeatWrapping;
+  t.repeat.set(repeat, repeat);
+  if (srgb) t.colorSpace = THREE.SRGBColorSpace;
+  t.anisotropy = 4;
+  return t;
+}
+
+// ---------- Escena ----------
+let renderer;
+try {
+  renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
+} catch (e) {
+  loading.textContent = 'Tu navegador no soporta WebGL.';
+  throw e;
+}
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.15;
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+document.body.prepend(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0b0507);
+scene.fog = new THREE.FogExp2(0x0b0507, .028);
+
+const camera = new THREE.PerspectiveCamera(40, window.innerWidth / window.innerHeight, .1, 250);
+camera.position.set(10, 6, 14);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.target.set(0, 3.8, 0);
+controls.enableDamping = true;
+controls.dampingFactor = .06;
+controls.enablePan = false;
+controls.minDistance = 5;
+controls.maxDistance = 30;
+controls.minPolarAngle = .15;
+controls.maxPolarAngle = 1.55;
+controls.autoRotate = true;
+controls.autoRotateSpeed = .6;
+
+// Luces
+scene.add(new THREE.HemisphereLight(0x5a3a44, 0x1a0806, .55));
+const key = new THREE.DirectionalLight(0xffc9a0, 1.3);
+key.position.set(7, 12, 9);
+key.castShadow = true;
+key.shadow.mapSize.set(2048, 2048);
+Object.assign(key.shadow.camera, { left: -9, right: 9, top: 11, bottom: -3, near: 1, far: 40 });
+key.shadow.bias = -.0005;
+scene.add(key);
+const rim = new THREE.DirectionalLight(0x6a86ff, 2.4);
+rim.position.set(-8, 7, -11);
+scene.add(rim);
+const floorGlow = new THREE.PointLight(0xff5a14, 40, 16, 2);
+floorGlow.position.set(0, .6, 2.5);
+scene.add(floorGlow);
+
+// Texturas compartidas
+const crackTex = tex(crackCanvas(), 2);
+const wingTex = crackTex.clone(); wingTex.repeat.set(1, 1); wingTex.needsUpdate = true;
+const bumpTex = tex(noiseCanvas(256, 22, 2), 3, false);
+const stoneTex = tex(noiseCanvas(256, 10, 9), 6);
+const floorCrackTex = crackTex.clone(); floorCrackTex.repeat.set(3, 3); floorCrackTex.needsUpdate = true;
+
+// Materiales
+const skinMat = new THREE.MeshStandardMaterial({
+  color: 0x1c100d, roughness: .82, metalness: .05,
+  emissive: 0xffffff, emissiveMap: crackTex, emissiveIntensity: 1.1,
+  bumpMap: bumpTex, bumpScale: 2.5,
+});
+const hornMat = new THREE.MeshStandardMaterial({ color: 0xcfbb94, roughness: .5, bumpMap: bumpTex, bumpScale: 1.5 });
+const clawMat = new THREE.MeshStandardMaterial({ color: 0x241612, roughness: .35, metalness: .2 });
+const toothMat = new THREE.MeshStandardMaterial({ color: 0xe8dcc0, roughness: .4 });
+const eyeMat = new THREE.MeshBasicMaterial({ color: new THREE.Color(4, 3, .6) });
+const mouthMat = new THREE.MeshBasicMaterial({ color: new THREE.Color(3, 1, .15) });
+const membraneMat = new THREE.MeshStandardMaterial({
+  color: 0x1e0a07, roughness: .75, side: THREE.DoubleSide,
+  emissive: 0xffffff, emissiveMap: wingTex, emissiveIntensity: .35,
+  bumpMap: bumpTex, bumpScale: 1.5,
+});
+const bladeMat = new THREE.MeshStandardMaterial({ color: 0x3a1a10, emissive: new THREE.Color(1, .45, .12), emissiveIntensity: 1.8, roughness: .3, metalness: .6 });
+const hiltMat = new THREE.MeshStandardMaterial({ color: 0x2a1c18, roughness: .4, metalness: .7 });
+const whipMat = new THREE.MeshBasicMaterial({ color: new THREE.Color(3.2, 1.3, .25) });
+const whipCoreMat = new THREE.MeshStandardMaterial({ color: 0x2a0d06, emissive: new THREE.Color(1, .35, .05), emissiveIntensity: 2 });
+
+// Suelo: plataforma de piedra sobre el abismo
+const platform = new THREE.Mesh(
+  rockify(new THREE.CylinderGeometry(9, 10, 1.4, 96, 4), .12, 1.2),
+  new THREE.MeshStandardMaterial({ color: 0x4a4048, map: stoneTex, roughness: .95, emissive: 0xffffff, emissiveMap: floorCrackTex, emissiveIntensity: .3 }),
+);
+platform.position.y = -.7;
+platform.receiveShadow = true;
+scene.add(platform);
+
+const abyss = new THREE.Mesh(
+  new THREE.PlaneGeometry(260, 260),
+  new THREE.MeshBasicMaterial({ color: new THREE.Color(1.1, .35, .08), map: (() => { const t = crackTex.clone(); t.repeat.set(18, 18); t.needsUpdate = true; return t; })() }),
+);
+abyss.rotation.x = -Math.PI / 2;
+abyss.position.y = -16;
+scene.add(abyss);
+
+// Columnas de roca alrededor
+const pillarMat = new THREE.MeshStandardMaterial({ color: 0x2c2530, map: stoneTex, roughness: 1 });
+for (let i = 0; i < 9; i++) {
+  const a = i / 9 * Math.PI * 2 + .3, r = rand(17, 26), h = 48;
+  const m = new THREE.Mesh(rockify(new THREE.CylinderGeometry(rand(1.2, 2), rand(1.6, 2.6), h, 20, 16), .35, .6, i), pillarMat);
+  m.position.set(Math.cos(a) * r, -8, Math.sin(a) * r);
+  scene.add(m);
+}
+
+// ---------- El Balrog ----------
+const B = {};
+const root = new THREE.Group();
+scene.add(root);
+
+function blob(rx, ry, rz, parent, x = 0, y = 0, z = 0, mat = skinMat, rough = .05) {
+  const g = new THREE.SphereGeometry(1, 40, 28);
+  g.scale(rx, ry, rz);
+  rockify(g, rough * Math.min(rx, ry, rz) * 2, 2.2 / Math.min(rx, ry, rz) + 1, x + y);
+  const m = new THREE.Mesh(g, mat);
+  m.position.set(x, y, z);
+  parent.add(m);
+  return m;
+}
+function joint(parent, x, y, z) {
+  const g = new THREE.Group();
+  g.position.set(x, y, z);
+  parent.add(g);
+  return g;
+}
+// Extremidad que cuelga hacia -Y desde el origen del grupo
+function limb(parent, len, r0, r1) {
+  const g = rockify(new THREE.CylinderGeometry(r0, r1, len, 20, 10, true), Math.min(r0, r1) * .12, 3);
+  g.translate(0, -len / 2, 0);
+  const m = new THREE.Mesh(g, skinMat);
+  parent.add(m);
+  blob(r0 * 1.02, r0 * 1.02, r0 * 1.02, parent, 0, 0, 0);
+  blob(r1 * 1.05, r1 * 1.05, r1 * 1.05, parent, 0, -len, 0);
+  return m;
+}
+function cone(parent, r, h, mat, x, y, z, rx = 0, ry = 0, rz = 0) {
+  const m = new THREE.Mesh(new THREE.ConeGeometry(r, h, 10), mat);
+  m.position.set(x, y, z);
+  m.rotation.set(rx, ry, rz);
+  parent.add(m);
+  return m;
+}
+
+// Caderas y piernas
+B.hips = joint(root, 0, 3.3, 0);
+blob(.95, .7, .72, B.hips, 0, 0, 0);
+B.legs = [];
+for (const s of [1, -1]) {
+  const hip = joint(B.hips, s * .62, -.25, .05);
+  hip.rotation.set(-.45, 0, s * .12);
+  limb(hip, 1.35, .5, .34);
+  blob(.42, .6, .45, hip, s * .05, -.45, .08); // muslo
+  const knee = joint(hip, 0, -1.35, 0);
+  knee.rotation.x = .95;
+  limb(knee, 1.25, .32, .22);
+  blob(.26, .45, .3, knee, 0, -.4, -.12); // pantorrilla
+  const ankle = joint(knee, 0, -1.25, 0);
+  ankle.rotation.x = -.7;
+  limb(ankle, .75, .21, .18);
+  const foot = joint(ankle, 0, -.75, 0);
+  foot.rotation.x = .2;
+  blob(.3, .16, .38, foot, 0, -.04, .18);
+  for (const tx of [-.17, 0, .17]) {
+    cone(foot, .07, .42, clawMat, tx, -.08, .62, Math.PI / 2, 0, 0);
+  }
+  cone(foot, .06, .3, clawMat, 0, -.02, -.22, -Math.PI / 2 - .3, 0, 0); // espolón
+  B.legs.push({ hip, knee, ankle });
+}
+
+// Torso inclinado hacia adelante
+B.spine = joint(B.hips, 0, .3, 0);
+B.spine.rotation.x = .22;
+blob(.72, .78, .58, B.spine, 0, .55, .05);
+B.chest = blob(1.3, 1.0, .9, B.spine, 0, 1.65, .05);
+for (const s of [1, -1]) {
+  blob(.56, .42, .3, B.spine, s * .5, 1.85, .62);           // pectorales
+  blob(.55, .55, .55, B.spine, s * 1.35, 2.25, 0);          // hombros
+  blob(.35, .55, .25, B.spine, s * .75, .9, .38);           // oblicuos
+}
+for (let i = 0; i < 4; i++) blob(.26, .16, .12, B.spine, (i % 2 ? -.2 : .2), .55 + Math.floor(i / 2) * .32, .6); // abdominales
+blob(.95, .38, .62, B.spine, 0, 2.35, -.12);                // trapecios
+for (let i = 0; i < 7; i++) {                                // púas de la espalda
+  cone(B.spine, .1 - i * .006, .55 - i * .03, hornMat, 0, .5 + i * .33, -.62 - Math.sin(i / 6 * Math.PI) * .25, -2.0, 0, 0);
+}
+// Luz del fuego interior
+B.fireLight = new THREE.PointLight(0xff6a1a, 70, 26, 2);
+B.fireLight.position.set(0, 1.9, 1.6);
+B.spine.add(B.fireLight);
+
+// Cuello y cabeza
+B.neck = joint(B.spine, 0, 2.45, .3);
+B.neck.rotation.x = .5;
+blob(.44, .58, .44, B.neck, 0, .3, 0);
+B.head = joint(B.neck, 0, .78, .1);
+B.head.rotation.x = -.6;
+blob(.6, .52, .7, B.head, 0, .1, 0);                       // cráneo
+blob(.6, .15, .22, B.head, 0, .24, .48);                    // ceja
+blob(.36, .28, .42, B.head, 0, -.08, .62);                  // hocico
+for (const s of [1, -1]) {
+  blob(.2, .16, .25, B.head, s * .38, -.08, .38);           // pómulos
+  const eye = new THREE.Mesh(new THREE.SphereGeometry(.075, 16, 12), eyeMat);
+  eye.position.set(s * .24, .1, .67);
+  B.head.add(eye);
+  // cuernos grandes (tipo toro)
+  const horn = new THREE.Mesh(taperTube([V(0, 0, 0), V(s * .45, .1, -.15), V(s * .95, .2, -.2), V(s * 1.3, .5, 0), V(s * 1.42, .98, .36)], .21, .025, 40, 12), hornMat);
+  horn.position.set(s * .38, .28, .05);
+  B.head.add(horn);
+  // cuernos traseros
+  const h2 = new THREE.Mesh(taperTube([V(0, 0, 0), V(s * .18, .25, -.3), V(s * .28, .6, -.7)], .1, .01, 20, 8), hornMat);
+  h2.position.set(s * .22, .42, -.15);
+  B.head.add(h2);
+  cone(B.head, .05, .28, hornMat, s * .5, -.12, .25, 0, 0, s * 1.9); // púas de mejilla
+}
+const mouthGlow = new THREE.Mesh(new THREE.SphereGeometry(1, 16, 12), mouthMat);
+mouthGlow.scale.set(.27, .1, .36);
+mouthGlow.position.set(0, -.22, .5);
+B.head.add(mouthGlow);
+for (let i = 0; i < 8; i++) {                               // dientes superiores
+  const a = (i / 7 - .5) * 2.2, x = Math.sin(a) * .3, z = .55 + Math.cos(a) * .38;
+  cone(B.head, .035, .15, toothMat, x, -.26, z, Math.PI, 0, 0);
+}
+B.jaw = joint(B.head, 0, -.2, .05);
+blob(.42, .15, .55, B.jaw, 0, -.12, .45);
+for (let i = 0; i < 7; i++) {                               // dientes inferiores
+  const a = (i / 6 - .5) * 2, x = Math.sin(a) * .26, z = .5 + Math.cos(a) * .36;
+  cone(B.jaw, .03, .13, toothMat, x, -.02, z);
+}
+B.mouthLight = new THREE.PointLight(0xff7a20, 0, 8, 2);
+B.mouthLight.position.set(0, -.3, 1.2);
+B.head.add(B.mouthLight);
+
+// Brazos
+B.arms = [];
+for (const s of [1, -1]) {
+  const sh = joint(B.spine, s * 1.45, 2.22, .05);
+  sh.rotation.set(-.25, 0, s * .38);
+  limb(sh, 1.45, .4, .3);
+  blob(.34, .55, .36, sh, 0, -.55, .1);    // bíceps
+  const el = joint(sh, 0, -1.45, 0);
+  el.rotation.set(-.75, 0, -s * .15);
+  limb(el, 1.3, .32, .22);
+  blob(.28, .5, .3, el, 0, -.4, 0);        // antebrazo
+  const hand = joint(el, 0, -1.32, 0);
+  blob(.3, .34, .18, hand, 0, -.2, 0);
+  for (let f = 0; f < 4; f++) {
+    const fg = joint(hand, (f - 1.5) * .13, -.42, .05);
+    fg.rotation.x = .9; // dedos curvados (agarrando)
+    limb(fg, .28, .06, .05);
+    cone(fg, .05, .2, clawMat, 0, -.36, 0, Math.PI, 0, 0);
+  }
+  const thumb = joint(hand, s * -.18, -.2, .12);
+  thumb.rotation.set(.6, 0, s * .6);
+  limb(thumb, .22, .06, .05);
+  cone(thumb, .045, .16, clawMat, 0, -.28, 0, Math.PI, 0, 0);
+  B.arms.push({ sh, el, hand, s });
+}
+B.handR = B.arms[0].hand;
+B.handL = B.arms[1].hand;
+
+// Espada en llamas (mano izquierda)
+B.sword = joint(B.handL, 0, -.28, .12);
+B.sword.rotation.set(1.1, 0, 0);
+{
+  const blade = new THREE.Mesh(new THREE.CylinderGeometry(.02, .15, 3.2, 4), bladeMat);
+  blade.scale.z = .25;
+  blade.position.y = 1.9;
+  B.sword.add(blade);
+  const guard = new THREE.Mesh(new THREE.BoxGeometry(.7, .1, .14), hiltMat);
+  guard.position.y = .28;
+  B.sword.add(guard);
+  const grip = new THREE.Mesh(new THREE.CylinderGeometry(.06, .06, .55, 8), hiltMat);
+  B.sword.add(grip);
+}
+
+// Alas de murciélago
+function makeWing() {
+  const g = new THREE.Group();
+  const P0 = V(0, 0, 0), E = V(1.3, .9, -.7), Wr = V(2.7, 2.0, -1.1);
+  const T = [V(5.1, 3.7, -1.4), V(5.9, 1.7, -1.7), V(5.3, -.3, -1.6), V(3.7, -1.5, -1.3)];
+  const Bt = V(.3, -1.9, -.2);
+  const sc = (a, b) => a.clone().add(b).multiplyScalar(.5).lerp(Wr, .28);
+  const edge = [T[0], sc(T[0], T[1]), T[1], sc(T[1], T[2]), T[2], sc(T[2], T[3]), T[3], sc(T[3], Bt), Bt, P0, E];
+
+  // membrana: abanico desde la muñeca, subdividido y abombado
+  const R = 8, U = 5, pos = [], uv = [], idx = [];
+  for (let w = 0; w < edge.length - 1; w++) {
+    const base = pos.length / 3;
+    for (let r = 0; r <= R; r++) for (let u = 0; u <= U; u++) {
+      const pe = edge[w].clone().lerp(edge[w + 1], u / U);
+      const p = Wr.clone().lerp(pe, r / R);
+      p.z -= Math.sin(r / R * Math.PI) * .35 * (1 - Math.abs(u / U - .5));
+      pos.push(p.x, p.y, p.z);
+      uv.push(p.x / 6, p.y / 6);
+    }
+    for (let r = 0; r < R; r++) for (let u = 0; u < U; u++) {
+      const a = base + r * (U + 1) + u, b = a + 1, c = a + U + 1, d = c + 1;
+      idx.push(a, c, b, b, c, d);
+    }
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  geo.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
+  geo.setIndex(idx);
+  geo.computeVertexNormals();
+  g.add(new THREE.Mesh(geo, membraneMat));
+
+  // huesos
+  const bone = (a, b, r0, r1, bend = .15) => {
+    const mid = a.clone().lerp(b, .5); mid.z -= bend;
+    g.add(new THREE.Mesh(taperTube([a, mid, b], r0, r1, 16, 8), skinMat));
+  };
+  bone(P0, E, .2, .15, .05);
+  bone(E, Wr, .15, .11, .05);
+  for (const t of T) bone(Wr, t, .1, .025, .2);
+  bone(Bt, P0, .06, .12, 0);
+  blob(.16, .16, .16, g, E.x, E.y, E.z);
+  blob(.14, .14, .14, g, Wr.x, Wr.y, Wr.z);
+  cone(g, .06, .4, clawMat, Wr.x - .05, Wr.y + .3, Wr.z, 0, 0, .4);
+  g.userData.edgePoints = edge.slice(0, 9);
+  return g;
+}
+B.wings = [];
+for (const s of [1, -1]) {
+  const pivot = joint(B.spine, s * .55, 2.05, -.62);
+  const w = makeWing();
+  if (s < 0) w.scale.x = -1;
+  pivot.add(w);
+  B.wings.push({ pivot, w, s });
+}
+
+// Sombras
+root.traverse(o => { if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; } });
+
+// Apoya los pies en el suelo
+root.updateMatrixWorld(true);
+{
+  let minY = Infinity;
+  const tmp = new THREE.Box3();
+  for (const l of B.legs) { tmp.setFromObject(l.hip); minY = Math.min(minY, tmp.min.y); }
+  B.hips.position.y -= minY;
+  B.baseHipsY = B.hips.position.y;
+}
+
+// Cola y látigo (se regeneran cada fotograma)
+const tailMesh = new THREE.Mesh(new THREE.BufferGeometry(), skinMat);
+tailMesh.castShadow = true;
+scene.add(tailMesh);
+const whipMeshes = [0, 1, 2].map(i => {
+  const m = new THREE.Mesh(new THREE.BufferGeometry(), i === 0 ? whipCoreMat : whipMat);
+  scene.add(m);
+  return m;
+});
+let whipPoints = [];
+
+// ---------- Fuego (partículas) ----------
+const N = 6000;
+const pPos = new Float32Array(N * 3), pVel = new Float32Array(N * 3);
+const pLife = new Float32Array(N), pMax = new Float32Array(N).fill(1), pSize = new Float32Array(N), pAttrLife = new Float32Array(N);
+let pCursor = 0;
+const pGeo = new THREE.BufferGeometry();
+pGeo.setAttribute('position', new THREE.BufferAttribute(pPos, 3).setUsage(THREE.DynamicDrawUsage));
+pGeo.setAttribute('aSize', new THREE.BufferAttribute(pSize, 1).setUsage(THREE.DynamicDrawUsage));
+pGeo.setAttribute('aLife', new THREE.BufferAttribute(pAttrLife, 1).setUsage(THREE.DynamicDrawUsage));
+const pMat = new THREE.ShaderMaterial({
+  uniforms: { uScale: { value: window.innerHeight * renderer.getPixelRatio() * .5 } },
+  vertexShader: `
+    attribute float aSize; attribute float aLife;
+    uniform float uScale;
+    varying float vLife;
+    void main() {
+      vLife = aLife;
+      vec4 mv = modelViewMatrix * vec4(position, 1.0);
+      gl_Position = projectionMatrix * mv;
+      gl_PointSize = aSize * uScale / -mv.z * (0.35 + 0.65 * aLife);
+    }`,
+  fragmentShader: `
+    varying float vLife;
+    void main() {
+      vec2 c = gl_PointCoord - 0.5;
+      float d = length(c);
+      if (d > 0.5 || vLife <= 0.0) discard;
+      float a = smoothstep(0.5, 0.0, d);
+      vec3 hot = vec3(1.0, 0.92, 0.65), mid = vec3(1.0, 0.45, 0.08), cool = vec3(0.55, 0.06, 0.02);
+      vec3 col = vLife > 0.6 ? mix(mid, hot, (vLife - 0.6) / 0.4) : mix(cool, mid, vLife / 0.6);
+      float alpha = a * smoothstep(0.0, 0.3, vLife);
+      gl_FragColor = vec4(col * alpha * 0.95, alpha);
+    }`,
+  transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+});
+const points = new THREE.Points(pGeo, pMat);
+points.frustumCulled = false;
+scene.add(points);
+
+function emit(p, v, size, life) {
+  const i = pCursor; pCursor = (pCursor + 1) % N;
+  pPos[i * 3] = p.x; pPos[i * 3 + 1] = p.y; pPos[i * 3 + 2] = p.z;
+  pVel[i * 3] = v.x; pVel[i * 3 + 1] = v.y; pVel[i * 3 + 2] = v.z;
+  pSize[i] = size; pLife[i] = pMax[i] = life;
+}
+const _p = new THREE.Vector3(), _v = new THREE.Vector3();
+function spawn(rate, dt, fn) {
+  let n = rate * dt;
+  while (n >= 1) { fn(); n--; }
+  if (Math.random() < n) fn();
+}
+function emitLocal(anchor, lx, ly, lz, vx, vy, vz, size, life) {
+  anchor.localToWorld(_p.set(lx, ly, lz));
+  emit(_p, _v.set(vx, vy, vz), size, life);
+}
+
+// ---------- Sonido (opcional) ----------
+const Sound = (() => {
+  let ac = null, out = null, noiseBuf = null, ambient = null, on = false;
+  function init() {
+    ac = new (window.AudioContext || window.webkitAudioContext)();
+    out = ac.createGain(); out.gain.value = .7;
+    const comp = ac.createDynamicsCompressor(); comp.threshold.value = -16; comp.ratio.value = 6;
+    out.connect(comp); comp.connect(ac.destination);
+    noiseBuf = ac.createBuffer(1, ac.sampleRate * 2, ac.sampleRate);
+    const d = noiseBuf.getChannelData(0);
+    for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+  }
+  function startAmbient() {
+    // crepitar del fuego + retumbar grave
+    const src = ac.createBufferSource(); src.buffer = noiseBuf; src.loop = true;
+    const f = ac.createBiquadFilter(); f.type = 'lowpass'; f.frequency.value = 500;
+    const g = ac.createGain(); g.gain.value = .12;
+    src.connect(f); f.connect(g); g.connect(out); src.start();
+    const hum = ac.createOscillator(); hum.type = 'sawtooth'; hum.frequency.value = 38;
+    const hf = ac.createBiquadFilter(); hf.type = 'lowpass'; hf.frequency.value = 120;
+    const hg = ac.createGain(); hg.gain.value = .08;
+    hum.connect(hf); hf.connect(hg); hg.connect(out); hum.start();
+    const crackle = setInterval(() => {
+      if (!on) return;
+      const t = ac.currentTime;
+      for (let i = 0; i < 3; i++) {
+        if (Math.random() < .5) continue;
+        const s = ac.createBufferSource(); s.buffer = noiseBuf;
+        const bf = ac.createBiquadFilter(); bf.type = 'bandpass'; bf.frequency.value = rand(1500, 5000); bf.Q.value = 3;
+        const cg = ac.createGain(); const tt = t + Math.random() * .2;
+        cg.gain.setValueAtTime(0, tt); cg.gain.linearRampToValueAtTime(rand(.05, .2), tt + .003); cg.gain.linearRampToValueAtTime(0, tt + .03);
+        s.connect(bf); bf.connect(cg); cg.connect(out); s.start(tt, Math.random()); s.stop(tt + .05);
+      }
+    }, 200);
+    ambient = { src, hum, crackle };
+  }
+  function roar() {
+    if (!on) return;
+    const t = ac.currentTime, d = 2.1;
+    const mk = (f0, f1, vol, lp) => {
+      const o = ac.createOscillator(); o.type = 'sawtooth';
+      o.frequency.setValueAtTime(f0, t); o.frequency.linearRampToValueAtTime(f0 * 1.15, t + .4); o.frequency.exponentialRampToValueAtTime(f1, t + d);
+      const lfo = ac.createOscillator(), lg = ac.createGain(); lfo.frequency.value = 14; lg.gain.value = 10;
+      lfo.connect(lg); lg.connect(o.frequency);
+      const f = ac.createBiquadFilter(); f.type = 'lowpass'; f.frequency.value = lp;
+      const g = ac.createGain();
+      g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(vol, t + .15); g.gain.setValueAtTime(vol, t + d * .6); g.gain.linearRampToValueAtTime(0, t + d);
+      o.connect(f); f.connect(g); g.connect(out); o.start(t); lfo.start(t); o.stop(t + d); lfo.stop(t + d);
+    };
+    mk(90, 45, .45, 800); mk(93, 47, .3, 500); mk(180, 90, .12, 1200);
+    const s = ac.createBufferSource(); s.buffer = noiseBuf; s.loop = true;
+    const f = ac.createBiquadFilter(); f.type = 'bandpass'; f.frequency.setValueAtTime(700, t); f.frequency.exponentialRampToValueAtTime(250, t + d); f.Q.value = 1.2;
+    const g = ac.createGain(); g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(.5, t + .15); g.gain.linearRampToValueAtTime(0, t + d);
+    s.connect(f); f.connect(g); g.connect(out); s.start(t); s.stop(t + d);
+  }
+  return {
+    get on() { return on; },
+    toggle() {
+      if (!ac) { init(); startAmbient(); }
+      on = !on;
+      on ? ac.resume() : ac.suspend();
+      return on;
+    },
+    roar,
+  };
+})();
+
+// ---------- Animación ----------
+let roarStart = -99, nextAutoRoar = 6;
+const clock = new THREE.Clock();
+function roarEnv(t) {
+  const k = t - roarStart;
+  if (k < 0 || k > 2.4) return 0;
+  if (k < .35) return k / .35;
+  if (k < 1.8) return 1;
+  return 1 - (k - 1.8) / .6;
+}
+function roar(t) {
+  if (t - roarStart < 2.4) return;
+  roarStart = t;
+  nextAutoRoar = t + rand(10, 14);
+  Sound.roar();
+}
+
+const worldUp = V(0, 1, 0), tmpA = new THREE.Vector3(), tmpB = new THREE.Vector3();
+
+function animate() {
+  const dt = Math.min(clock.getDelta(), .05);
+  const t = clock.elapsedTime;
+  if (t > nextAutoRoar) roar(t);
+  const e = roarEnv(t);
+
+  // Cuerpo: respiración, balanceo y rugido
+  const breath = Math.sin(t * 1.3);
+  B.hips.position.y = B.baseHipsY + breath * .03 - e * .08;
+  B.hips.rotation.z = Math.sin(t * .5) * .035;
+  B.spine.rotation.x = .22 + breath * .025 - e * .12;
+  B.chest.scale.setScalar(1 + breath * .025 + e * .04);
+  B.neck.rotation.x = .5 - e * .25;
+  B.neck.rotation.y = Math.sin(t * .37) * .25 * (1 - e);
+  B.head.rotation.x = -.6 - e * .35 + Math.sin(t * .8) * .04;
+  B.head.rotation.y = Math.sin(t * .37 + .6) * .3 * (1 - e);
+  B.jaw.rotation.x = .06 + Math.max(0, Math.sin(t * 2.2)) * .04 + e * .6;
+  B.mouthLight.intensity = e * 60;
+
+  // Brazos
+  const [aR, aL] = B.arms;
+  aR.sh.rotation.x = -.25 + Math.sin(t * .9) * .12 - e * .35;
+  aR.sh.rotation.z = .38 + e * .35;
+  aR.el.rotation.x = -.75 + Math.sin(t * .9 + .5) * .15;
+  aL.sh.rotation.x = -.35 + Math.sin(t * .7 + 2) * .08 - e * .5;
+  aL.sh.rotation.z = -.38 - e * .3;
+  aL.el.rotation.x = -.95 + Math.sin(t * .7 + 2.4) * .1 - e * .3;
+
+  // Alas: batido lento y amenazante; se abren al rugir
+  for (const { pivot, s } of B.wings) {
+    const f = Math.sin(t * 1.1);
+    pivot.rotation.set(-.1 + f * .08, s * (-.35 + f * .18 - e * .35), s * (.15 + f * .22 + e * .25));
+  }
+
+  // Lava que late
+  skinMat.emissiveIntensity = 1.05 + Math.sin(t * 2.1) * .2 + Math.sin(t * 5.3) * .08 + e * .9;
+  membraneMat.emissiveIntensity = .32 + e * .4;
+  B.fireLight.intensity = 60 + Math.random() * 25 + e * 60;
+  floorGlow.intensity = 34 + Math.random() * 10 + e * 30;
+
+  root.position.x = e > 0 ? (Math.random() - .5) * .04 * e : 0;
+  root.updateMatrixWorld(true);
+
+  // Cola
+  {
+    const pts = [];
+    const base = B.hips.localToWorld(tmpA.set(0, -.1, -.55)).clone();
+    pts.push(base);
+    for (let i = 1; i <= 8; i++) {
+      const sway = Math.sin(t * .9 - i * .55) * .22 * i;
+      const p = V(base.x + sway, Math.max(.12, base.y - i * .5 + i * i * .02), base.z - i * .58 + Math.cos(t * .6 - i * .4) * .1 * i);
+      pts.push(p);
+    }
+    tailMesh.geometry = taperTube(pts, .34, .03, 60, 12, tailMesh.geometry);
+  }
+
+  // Látigo de fuego desde la mano derecha
+  {
+    const start = B.handR.localToWorld(tmpA.set(0, -.3, .15)).clone();
+    const pts = [start];
+    const dir = V(.55, 0, 1).normalize();
+    let p = start.clone();
+    for (let i = 1; i <= 16; i++) {
+      const k = i / 16;
+      p = start.clone()
+        .addScaledVector(dir, i * .62)
+        .add(V(Math.sin(t * 1.4 - i * .5) * .35 * k * 3, 0, Math.cos(t * 1.1 - i * .45) * .25 * k * 3));
+      p.y = Math.max(.06, start.y - i * .75 + Math.sin(t * 1.3 - i * .6) * .2 + (e * Math.sin(k * Math.PI) * 2));
+      pts.push(p);
+    }
+    whipPoints = pts;
+    whipMeshes[0].geometry = taperTube(pts, .09, .035, 120, 8, whipMeshes[0].geometry);
+    // dos colas extra más finas en el tramo final
+    for (let j = 1; j <= 2; j++) {
+      const sub = pts.slice(10).map((q, i) => q.clone().add(V(Math.sin(t * 2 + i + j * 2) * .18 * i * .4 * (j === 1 ? 1 : -1), 0, Math.cos(t * 1.7 + i + j) * .15 * i * .3)));
+      sub.forEach(q => { q.y = Math.max(.04, q.y); });
+      whipMeshes[j].geometry = taperTube(sub, .04, .012, 40, 6, whipMeshes[j].geometry);
+    }
+  }
+
+  // Emisores de fuego
+  const boost = 1 + e * 2.5;
+  spawn(260 * boost, dt, () => emitLocal(B.head, rand(-.5, .5), rand(.3, .75), rand(-.7, .1), rand(-.3, .3), rand(1.8, 3.2), rand(-1, -.2), rand(.3, .6), rand(.5, 1)));
+  spawn(300 * boost, dt, () => emitLocal(B.spine, rand(-1.1, 1.1), rand(1.6, 2.7), rand(-.85, -.25), rand(-.4, .4), rand(1.6, 3), rand(-1.2, -.3), rand(.35, .75), rand(.5, 1.1)));
+  for (const s of [1, -1]) spawn(90 * boost, dt, () => emitLocal(B.spine, s * 1.35 + rand(-.3, .3), rand(2.4, 2.8), rand(-.3, .3), rand(-.3, .3), rand(1.5, 2.5), rand(-.4, .2), rand(.3, .6), rand(.4, .8)));
+  spawn(110, dt, () => emitLocal(B.handR, rand(-.2, .2), rand(-.5, 0), rand(-.1, .2), 0, rand(1, 2), 0, rand(.2, .4), rand(.3, .6)));
+  spawn(110, dt, () => emitLocal(B.handL, rand(-.2, .2), rand(-.5, 0), rand(-.1, .2), 0, rand(1, 2), 0, rand(.2, .4), rand(.3, .6)));
+  spawn(420, dt, () => emitLocal(B.sword, rand(-.08, .08), rand(.4, 3.4), rand(-.03, .03), rand(-.2, .2), rand(1, 2.2), rand(-.2, .2), rand(.15, .38), rand(.3, .6)));
+  spawn(480, dt, () => {
+    const i = 1 + Math.floor(Math.random() * (whipPoints.length - 2));
+    const a = whipPoints[i], b = whipPoints[i + 1];
+    tmpB.copy(a).lerp(b, Math.random());
+    emit(tmpB, _v.set(rand(-.2, .2), rand(.8, 1.8), rand(-.2, .2)), rand(.12, .3), rand(.3, .6));
+  });
+  if (e > 0) {
+    // chorro de fuego al rugir
+    const dirF = B.head.localToWorld(tmpA.set(0, -.3, 2)).sub(B.head.localToWorld(tmpB.set(0, -.3, .8))).normalize();
+    spawn(900 * e, dt, () => {
+      B.head.localToWorld(_p.set(rand(-.1, .1), -.28, .85));
+      const sp = rand(5, 10);
+      emit(_p, _v.set(dirF.x * sp + rand(-.8, .8), dirF.y * sp + rand(-.5, 1), dirF.z * sp + rand(-.8, .8)), rand(.3, .7), rand(.4, .8));
+    });
+  }
+  for (const { w } of B.wings) {
+    spawn(30, dt, () => {
+      const ep = w.userData.edgePoints, i = Math.floor(Math.random() * (ep.length - 1));
+      w.localToWorld(_p.copy(ep[i]).lerp(ep[i + 1], Math.random()));
+      emit(_p, _v.set(rand(-.2, .2), rand(.5, 1.2), rand(-.2, .2)), rand(.08, .16), rand(.6, 1.2));
+    });
+  }
+  // brasas del ambiente
+  spawn(30, dt, () => {
+    const a = Math.random() * Math.PI * 2, r = rand(1, 14);
+    emit(_p.set(Math.cos(a) * r, rand(-3, .5), Math.sin(a) * r), _v.set(rand(-.2, .2), rand(.4, 1), rand(-.2, .2)), rand(.05, .12), rand(3, 6));
+  });
+
+  // Actualizar partículas
+  for (let i = 0; i < N; i++) {
+    if (pLife[i] <= 0) { pAttrLife[i] = 0; continue; }
+    pLife[i] -= dt;
+    const j = i * 3;
+    pVel[j] += Math.sin(t * 3 + i) * .6 * dt;
+    pVel[j + 1] += 2.2 * dt;
+    pVel[j + 2] += Math.cos(t * 2.6 + i * 1.7) * .6 * dt;
+    const drag = 1 - 1.2 * dt;
+    pVel[j] *= drag; pVel[j + 1] *= drag; pVel[j + 2] *= drag;
+    pPos[j] += pVel[j] * dt; pPos[j + 1] += pVel[j + 1] * dt; pPos[j + 2] += pVel[j + 2] * dt;
+    pAttrLife[i] = Math.max(0, pLife[i] / pMax[i]);
+  }
+  pGeo.attributes.position.needsUpdate = true;
+  pGeo.attributes.aSize.needsUpdate = true;
+  pGeo.attributes.aLife.needsUpdate = true;
+
+  controls.update();
+  composer.render();
+}
+
+// ---------- Post-procesado (resplandor) ----------
+const composer = new EffectComposer(renderer);
+composer.addPass(new RenderPass(scene, camera));
+const bloom = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), .75, .5, .8);
+composer.addPass(bloom);
+composer.addPass(new OutputPass());
+
+function onResize() {
+  const w = window.innerWidth, h = window.innerHeight;
+  camera.aspect = w / h;
+  camera.updateProjectionMatrix();
+  renderer.setSize(w, h);
+  composer.setSize(w, h);
+  pMat.uniforms.uScale.value = h * renderer.getPixelRatio() * .5;
+}
+window.addEventListener('resize', onResize);
+if (window.innerWidth < 700) { camera.position.set(12, 7, 17); }
+
+// ---------- Controles de la interfaz ----------
+const btnSpin = document.getElementById('btnSpin');
+const btnSound = document.getElementById('btnSound');
+function setSpin(on) {
+  controls.autoRotate = on;
+  btnSpin.textContent = on ? 'Giro auto: sí' : 'Giro auto: no';
+  btnSpin.setAttribute('aria-pressed', String(on));
+}
+controls.addEventListener('start', () => setSpin(false));
+btnSpin.addEventListener('click', () => setSpin(!controls.autoRotate));
+document.getElementById('btnRoar').addEventListener('click', () => roar(clock.elapsedTime));
+btnSound.addEventListener('click', () => {
+  const on = Sound.toggle();
+  btnSound.textContent = on ? 'Sonido: sí' : 'Sonido: no';
+  btnSound.setAttribute('aria-pressed', String(on));
+});
+
+renderer.setAnimationLoop(animate);
+requestAnimationFrame(() => requestAnimationFrame(() => loading.classList.add('hide')));
+</script>
+</body>
+</html>

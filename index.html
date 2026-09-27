@@ -37,7 +37,14 @@
     text-shadow: 3px 3px 0 #3a0e08;
   }
   h1 span { color: var(--magic); text-shadow: 3px 3px 0 #10223d; }
-  p.sub { margin: 0 0 18px; color: var(--muted); font-size: 15px; }
+  p.sub { margin: 0 0 12px; color: var(--muted); font-size: 15px; }
+  .link3d {
+    display: inline-block; margin: 0 0 18px;
+    font-family: "Press Start 2P", monospace; font-size: 10px; line-height: 1.4;
+    padding: 10px 14px; color: #fff3c4; text-decoration: none;
+    background: var(--panel); border: 2px solid var(--fire); box-shadow: 3px 3px 0 #000;
+  }
+  .link3d:hover { background: #2a1510; }
   .stage {
     position: relative;
     border: 4px solid var(--border);
@@ -89,6 +96,7 @@
 <main>
   <h1><span>El Mago</span> y el Balrog</h1>
   <p class="sub">Un duelo en pixel art sobre el puente roto. Hecho solo con Canvas y JavaScript.</p>
+  <a class="link3d" href="balrog3d.html">Ver al Balrog en 3D →</a>
 
   <div class="stage">
     <canvas id="scene" width="320" height="180" aria-label="Animación: un demonio de fuego surge del abismo, pelea con un mago y lo arrastra con su látigo"></canvas>
